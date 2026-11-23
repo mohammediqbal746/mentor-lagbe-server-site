@@ -528,6 +528,136 @@ app.patch('/applications/status/:id', verifyToken, verifyTutor, async (req, res)
     res.status(500).send({ message: 'Failed to update application status' });
   }
 });
+// ==================== BOOKMARKS API (STUDENT) ====================
+
+// 1. Toggle Bookmark (Add/Remove) - Free limit: 5, Pro: Unlimited
+app.post('/student/bookmarks/:tuitionId', verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const tuitionId = req.params.tuitionId;
+    const user = await usersCollection.findOne({ email });
+    const currentBookmarks = user?.bookmarks || [];
+
+    const isBookmarked = currentBookmarks.includes(tuitionId);
+
+    if (isBookmarked) {
+      await usersCollection.updateOne(
+        { email },
+        { $pull: { bookmarks: tuitionId } }
+      );
+      return res.send({ bookmarked: false, message: 'Removed from saved tuitions' });
+    }
+
+    if (user?.plan !== 'pro' && currentBookmarks.length >= 5) {
+      return res.status(403).send({
+        message: 'Free students can bookmark up to 5 tuitions. Upgrade to Pro for unlimited bookmarks!'
+      });
+    }
+
+    await usersCollection.updateOne(
+      { email },
+      { $addToSet: { bookmarks: tuitionId } }
+    );
+    res.send({ bookmarked: true, message: 'Added to saved tuitions' });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update bookmark' });
+  }
+});
+
+// 2. Get All Bookmarked Tuitions for Logged-in Student
+app.get('/student/bookmarks', verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email });
+    const bookmarkIds = (user?.bookmarks || [])
+      .filter(id => ObjectId.isValid(id))
+      .map(id => new ObjectId(id));
+
+    if (bookmarkIds.length === 0) {
+      return res.send([]);
+    }
+
+    const tuitions = await tuitionsCollection
+      .find({ _id: { $in: bookmarkIds } })
+      .toArray();
+    res.send(tuitions);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch bookmarked tuitions' });
+  }
+});
+
+// ==================== DASHBOARD STATS API ====================
+
+// 1. Student Dashboard Stats
+app.get('/stats/student', verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email });
+    const totalApplied = await applicationsCollection.countDocuments({ studentEmail: email });
+    const acceptedApps = await applicationsCollection.countDocuments({ studentEmail: email, status: 'accepted' });
+    const pendingApps = await applicationsCollection.countDocuments({ studentEmail: email, status: 'pending' });
+
+    res.send({
+      totalApplied,
+      acceptedApps,
+      pendingApps,
+      plan: user?.plan || 'free',
+      totalBookmarks: user?.bookmarks?.length || 0
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch student stats' });
+  }
+});
+
+// 2. Tutor Dashboard Stats
+app.get('/stats/tutor', verifyToken, verifyTutor, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email });
+    const totalPosted = await tuitionsCollection.countDocuments({ tutorEmail: email });
+    const approvedTuitions = await tuitionsCollection.countDocuments({
+      tutorEmail: email,
+      approvalStatus: 'approved',
+      isActive: true
+    });
+    const totalApplicants = await applicationsCollection.countDocuments({ tutorEmail: email });
+
+    res.send({
+      totalPosted,
+      approvedTuitions,
+      totalApplicants,
+      plan: user?.plan || 'free'
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch tutor stats' });
+  }
+});
+
+// 3. Admin Dashboard Stats
+app.get('/stats/admin', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const totalUsers = await usersCollection.countDocuments();
+    const totalTutors = await usersCollection.countDocuments({ role: 'tutor' });
+    const pendingTuitions = await tuitionsCollection.countDocuments({ approvalStatus: 'pending' });
+    const approvedTuitions = await tuitionsCollection.countDocuments({ approvalStatus: 'approved' });
+
+    const revenueResult = await paymentsCollection.aggregate([
+      { $match: { paymentStatus: 'paid' } },
+      { $group: { _id: null, totalRevenue: { $sum: '$amount' } } }
+    ]).toArray();
+    const totalRevenue = revenueResult[0]?.totalRevenue || 0;
+
+    res.send({
+      totalUsers,
+      totalTutors,
+      pendingTuitions,
+      approvedTuitions,
+      totalRevenue
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch admin stats' });
+  }
+});
 // Root Route
 app.get('/', (req, res) => {
   res.send({ status: 'ok', message: 'MentorLagbe Server is running!' });
