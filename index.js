@@ -401,6 +401,133 @@ app.patch('/admin/tuitions/status/:id', verifyToken, verifyAdmin, async (req, re
     res.status(500).send({ message: 'Failed to update tuition status' });
   }
 });
+
+// ==================== APPLICATIONS API ====================
+
+// 1. Submit Tuition Application (Student only + Duplicate Prevention)
+app.post('/applications', verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const studentEmail = req.decoded.email;
+    const {
+      tuitionId,
+      tuitionTitle,
+      subject,
+      monthlyFee,
+      tutorEmail,
+      studentName,
+      studentPhone,
+      preferredSchedule,
+      studentNote
+    } = req.body;
+
+    // Prevent duplicate application by the same student for the same tuition
+    const existingApp = await applicationsCollection.findOne({
+      tuitionId,
+      studentEmail
+    });
+    if (existingApp) {
+      return res.status(409).send({ message: 'You have already applied for this tuition!' });
+    }
+
+    const newApplication = {
+      tuitionId,
+      tuitionTitle,
+      subject,
+      monthlyFee: Number(monthlyFee),
+      tutorEmail,
+      studentName,
+      studentEmail,
+      studentPhone,
+      preferredSchedule,
+      studentNote: studentNote || '',
+      status: 'pending',
+      appliedAt: new Date()
+    };
+
+    const result = await applicationsCollection.insertOne(newApplication);
+    res.send({ insertedId: result.insertedId, application: newApplication });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to submit application' });
+  }
+});
+
+// 2. Get Student's Own Applications (Student only)
+app.get('/student/applications', verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const studentEmail = req.decoded.email;
+    const applications = await applicationsCollection
+      .find({ studentEmail })
+      .sort({ appliedAt: -1 })
+      .toArray();
+    res.send(applications);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch applications' });
+  }
+});
+
+// 3. Cancel/Delete Pending Application (Student only)
+app.delete('/applications/:id', verifyToken, verifyStudent, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const studentEmail = req.decoded.email;
+
+    const application = await applicationsCollection.findOne({
+      _id: new ObjectId(id),
+      studentEmail
+    });
+
+    if (!application) {
+      return res.status(404).send({ message: 'Application not found' });
+    }
+    if (application.status !== 'pending') {
+      return res.status(400).send({ message: 'Only pending applications can be cancelled' });
+    }
+
+    const result = await applicationsCollection.deleteOne({ _id: new ObjectId(id) });
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to cancel application' });
+  }
+});
+
+// 4. Get All Applicants for Tutor's Tuitions (Tutor only)
+app.get('/tutor/applicants', verifyToken, verifyTutor, async (req, res) => {
+  try {
+    const tutorEmail = req.decoded.email;
+    const applicants = await applicationsCollection
+      .find({ tutorEmail })
+      .sort({ appliedAt: -1 })
+      .toArray();
+    res.send(applicants);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch applicants' });
+  }
+});
+
+// 5. Accept or Reject Application (Tutor only)
+app.patch('/applications/status/:id', verifyToken, verifyTutor, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const tutorEmail = req.decoded.email;
+    const { status } = req.body;
+
+    if (!['accepted', 'rejected'].includes(status)) {
+      return res.status(400).send({ message: 'Invalid status' });
+    }
+
+    const result = await applicationsCollection.updateOne(
+      { _id: new ObjectId(id), tutorEmail },
+      { $set: { status } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).send({ message: 'Application not found or unauthorized' });
+    }
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update application status' });
+  }
+});
 // Root Route
 app.get('/', (req, res) => {
   res.send({ status: 'ok', message: 'MentorLagbe Server is running!' });
