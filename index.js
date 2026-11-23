@@ -112,6 +112,99 @@ const verifyAdmin = async (req, res, next) => {
   next();
 };
 
+// ==================== USERS API ====================
+
+// 1. Save or get user on Sign Up / Login
+app.post('/users', async (req, res) => {
+  try {
+    const user = req.body;
+    const existingUser = await usersCollection.findOne({ email: user.email });
+    if (existingUser) {
+      return res.send({ message: 'User already exists', user: existingUser });
+    }
+    const newUser = {
+      name: user.name || 'User',
+      email: user.email,
+      image: user.image || '',
+      role: user.role || 'student',
+      phone: user.phone || '',
+      bio: user.bio || '',
+      plan: 'free',
+      bookmarks: [],
+      createdAt: new Date()
+    };
+    const result = await usersCollection.insertOne(newUser);
+    res.send({ insertedId: result.insertedId, user: newUser });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to save user' });
+  }
+});
+
+// 2. Get single user by email
+app.get('/users/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (req.decoded.email !== email) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    const user = await usersCollection.findOne({ email });
+    res.send(user);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch user' });
+  }
+});
+
+// 3. Update user profile (Shared for all roles)
+app.patch('/users/profile/:email', verifyToken, async (req, res) => {
+  try {
+    const email = req.params.email;
+    if (req.decoded.email !== email) {
+      return res.status(403).send({ message: 'Forbidden access' });
+    }
+    const { name, phone, bio, image } = req.body;
+    const updateDoc = {
+      $set: {
+        ...(name && { name }),
+        ...(phone !== undefined && { phone }),
+        ...(bio !== undefined && { bio }),
+        ...(image !== undefined && { image }),
+      }
+    };
+    const result = await usersCollection.updateOne({ email }, updateDoc);
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update profile' });
+  }
+});
+
+// 4. Get all users (Admin only)
+app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const users = await usersCollection.find().sort({ createdAt: -1 }).toArray();
+    res.send(users);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch users' });
+  }
+});
+
+// 5. Update user role (Admin only)
+app.patch('/users/role/:id', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { role } = req.body;
+    if (!['student', 'tutor', 'admin'].includes(role)) {
+      return res.status(400).send({ message: 'Invalid role' });
+    }
+    const result = await usersCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role } }
+    );
+    res.send(result);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to update user role' });
+  }
+});
+
 // Root Route
 app.get('/', (req, res) => {
   res.send({ status: 'ok', message: 'MentorLagbe Server is running!' });
