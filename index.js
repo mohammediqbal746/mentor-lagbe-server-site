@@ -3,6 +3,7 @@ const cors = require('cors');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion,ObjectId } = require('mongodb');
 const jwt = require('jsonwebtoken');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -656,6 +657,117 @@ app.get('/stats/admin', verifyToken, verifyAdmin, async (req, res) => {
     });
   } catch (error) {
     res.status(500).send({ message: 'Failed to fetch admin stats' });
+  }
+});
+// ==================== STRIPE PAYMENT API ====================
+
+// 1. Create Stripe Checkout Session (Pro Tutor $15 / Pro Student $10)
+app.post('/create-checkout-session', verifyToken, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email });
+    if (!user) {
+      return res.status(404).send({ message: 'User not found' });
+    }
+
+    const isTutor = user.role === 'tutor';
+    const amount = isTutor ? 15 : 10; // $15 for Tutor, $10 for Student
+    const planName = isTutor ? 'Pro Tutor Plan' : 'Pro Student Plan';
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      customer_email: email,
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: {
+              name: `MentorLagbe - ${planName}`,
+              description: isTutor
+                ? 'Unlimited tuition posts & verified tutor badge'
+                : 'Unlimited tuition bookmarks & priority booking',
+            },
+            unit_amount: amount * 100, // Stripe expects cents
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        userEmail: email,
+        userName: user.name || 'User',
+        userRole: user.role,
+        planName,
+        amount: String(amount),
+      },
+      success_url: `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+    });
+
+    res.send({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error('Stripe Checkout Error:', error);
+    res.status(500).send({ message: 'Failed to create checkout session' });
+  }
+});
+
+// 2. Verify Stripe Session, Record Payment & Upgrade User to Pro
+app.post('/payments/verify', verifyToken, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).send({ message: 'Session ID is required' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.payment_status !== 'paid') {
+      return res.status(400).send({ message: 'Payment not completed' });
+    }
+
+    // Check if already recorded to prevent duplicates
+    const existingPayment = await paymentsCollection.findOne({ stripeSessionId: sessionId });
+    if (existingPayment) {
+      return res.send({ success: true, payment: existingPayment, message: 'Already verified' });
+    }
+
+    const { userEmail, userName, userRole, planName, amount } = session.metadata;
+
+    const paymentRecord = {
+      userEmail,
+      userName,
+      userRole,
+      planName,
+      amount: Number(amount),
+      currency: session.currency || 'usd',
+      transactionId: session.payment_intent || sessionId,
+      stripeSessionId: sessionId,
+      paymentStatus: 'paid',
+      paidAt: new Date(),
+    };
+
+    await paymentsCollection.insertOne(paymentRecord);
+    await usersCollection.updateOne(
+      { email: userEmail },
+      { $set: { plan: 'pro' } }
+    );
+
+    res.send({ success: true, payment: paymentRecord });
+  } catch (error) {
+    console.error('Payment Verification Error:', error);
+    res.status(500).send({ message: 'Failed to verify payment' });
+  }
+});
+
+// 3. Get All Transactions (Admin only)
+app.get('/admin/transactions', verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const transactions = await paymentsCollection
+      .find()
+      .sort({ paidAt: -1 })
+      .toArray();
+    res.send(transactions);
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to fetch transactions' });
   }
 });
 // Root Route
